@@ -23,7 +23,7 @@
     <ClInclude Include="..\..\..\Repair360Jiagu\Leb128.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="..\..\..\Repair360Jiagu\main.cpp">
+    <ClCompile Include="main.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
     </ClCompile>
   </ItemGroup>
