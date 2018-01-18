@@ -181,11 +181,16 @@ int generateMapFile(int argc, char** argv)
 	{
 		if (*table[i] =='\0')
 		{
+			strcpy(table[i], "0x");
+			if (i < 0x10)
+			{
+				strcat(table[i], "0");
+			}
 			char string[7];
 			itoa(i, string, 16);
-			strcpy(table[i], string);
+			strcat(table[i], string);
 			strcat(table[i], " ");			
-			strcat(table[i], "unknow");
+			strcat(table[i], "NULL");
 			strcat(table[i], " ");
 			itoa(Opcode_Len[i], string, 10);
 			strcat(table[i], string);
@@ -203,9 +208,12 @@ int generateMapFile(int argc, char** argv)
 
 void generateMapTable(char table[256][100],const DexCode* sourceData, const DexCode* encryptData, u1 key, bool lookUpTable) 
 {
-	printf("进入map表创建函数");
 	u4 insnsSize = sourceData->insnsSize;
-	for (u4 i = 0; i < insnsSize; i++)
+	//默认情况下伪指令是在指令的最后部分, 因此指令查找到伪指令起始指令即可,但是要注意伪指令必须位于偶数字节码偏移(4字节对齐), 因此之前一个指令可能为nop指令
+	u4 insns_end_offset = insnsSize;
+	u4 offset = 0;
+	bool hasDirective = false;
+	for (u4 i = 0; i < insns_end_offset; i++)
 	{
 		Opcode opcode = dexOpcodeFromCodeUnit(sourceData->insns[i]);
 		Opcode encrypt_opcode;
@@ -216,12 +224,43 @@ void generateMapTable(char table[256][100],const DexCode* sourceData, const DexC
 		{
 			encrypt_opcode = (Opcode)(dexOpcodeFromCodeUnit(encryptData->insns[i]) ^ key);
 		}
+		// 这里要考虑packed-switch-payload, sparse-switch-payload, fill-array-data-payload三种伪指令的情况
 		printf("当前指令: %s\n", dexGetOpcodeName(opcode));
+		//packed-switch vAA, +BBBBBBBB  fill-array-data vAA, +BBBBBBBB  sparse-switch vAA, +BBBBBBBB
+		if (opcode == OP_PACKED_SWITCH || opcode == OP_SPARSE_SWITCH || opcode == OP_FILL_ARRAY_DATA) {			
+			printf("%s指令索引: %d  ", dexGetOpcodeName(opcode), i);
+			offset = (sourceData->insns[i + 1] | (sourceData->insns[i + 2] << 16)) + i;
+			printf("%s 数据在指令中索引: %d\n", dexGetOpcodeName(opcode), offset);
+			if (offset < insns_end_offset)
+			{
+				insns_end_offset = offset;
+				printf("更新伪指令起始指令索引: %d\n", insns_end_offset);
+			}
+			hasDirective = true;
+		}
+		if (hasDirective && i == (insns_end_offset - 1))	//由于伪指令4字节对齐的原因可能这条指令为空指令
+		{
+			if (opcode == OP_NOP)
+			{
+				break;
+			}
+		}
 		int len = Opcode_Len[opcode];
 		char string[7];
+
+		strcpy(table[opcode], "0x");
+		if (opcode < 0x10)
+		{
+			strcat(table[opcode], "0");
+		}
 		itoa(opcode, string, 16);
-		strcpy(table[opcode], string);
+		strcat(table[opcode], string);
 		strcat(table[opcode], " ");
+		strcat(table[opcode], "0x");
+		if (encrypt_opcode < 0x10)
+		{
+			strcat(table[opcode], "0");
+		}
 		itoa(encrypt_opcode, string, 16);
 		strcat(table[opcode], string);
 		strcat(table[opcode], " ");
