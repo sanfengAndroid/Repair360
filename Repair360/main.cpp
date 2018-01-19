@@ -4,10 +4,19 @@
 
 #include "DexFile.h"
 #include "Leb128.h"
+#include "Utils.h"
 
+u1* getFileData(const char* path, size_t& len);
+int repairDexFile(int argc, char** argv);
+int readMapFile(const char* path);
+void findNativeMethodAndRepair(DexFile* pDexFile, u1* pFileEnd, u1 key_360);
+int findOpcodeRealIndex(Opcode opcode);
 
 #define BYTE4_ALIGN(a) ( ((a) % 4) ? ((((a) >> 2) << 2) + 4): (a))
-u1 opcode_table[256] = { 0 };
+#define LINE_MAX_CHAR_NUM 100
+u1* opcode_table = NULL;
+u1* pOriginalOpcode = NULL;
+u1* pEncryptOpcode = NULL;
 bool isLookUpTable = false;
 bool decryptMode = false;
 
@@ -32,17 +41,21 @@ int Opcode_Len[256] = {
 };
 
 
+
 int main(int argc, char **argv)
 {
-	if (argc < 3) {
+	if (argc < 6) {
 		printf("Too few parameters\n");
+		printf("format: \n");
+		printf("-g source.dex encrypt.dex file_path key [opcode_table]		generate map file\n");
+		printf("-d encrypt.dex out.dex map.txt key [opcode_table]			repair dex file\n");
 		return -1;
 	}
 	if (strcmp(argv[1], "-g") == 0) {
 		printf("You chose to generate the command map\n");
-		if (argc != 5 && argc != 6)
+		if (argc != 6 && argc != 7)
 		{
-			printf("Not enough parameters, format: -g source.dex encrypt.dex file_path [opcode_table]\n");
+			printf("parameters error, format: -g source.dex encrypt.dex file_path key [opcode_table]\n");
 			return -1;
 		}
 		decryptMode = false;
@@ -51,6 +64,13 @@ int main(int argc, char **argv)
 	}
 	else if (strcmp(argv[1], "-d") == 0) {
 		printf("You have chosen to repair the file mode\n");
+		if (argc != 6 && argc != 7)
+		{
+			printf("parameters error, format: -d encrypt.dex out.dex map.txt key [opcode_table]\n");
+			return -1;
+		}
+		decryptMode = true;
+		repairDexFile(argc, argv);
 	}
 	if (false)
 	{
@@ -102,68 +122,142 @@ int main(int argc, char **argv)
 	return 0;
 }
 
-int generateMapFile(int argc, char** argv)
-{	
-	//这里注意要必须指定为二进制格式读, 如果以只读方式读取文件可能会导致部分文件读取数据错误
-	FILE *fp = fopen(argv[2], "rb");
-	if (fp == NULL) {
-		printf("open %s dex file error!\n", argv[2]);
-		return -1;
-	}
-	fseek(fp, 0, SEEK_END);
-	size_t source_dex_len = ftell(fp);
-	fseek(fp, 0, SEEK_SET);
-	printf("source dex file length: 0x%x\n", source_dex_len);
-	u1* source_data = (u1*)malloc(source_dex_len);
-	if (source_data == NULL) {
-		printf("malloc memory fail!\n");
-		return -1;
-	}
-	fread(source_data, source_dex_len, 1, fp);
-	fclose(fp);
-
-	FILE *fp2 = fopen(argv[3], "rb");
-	if (fp2 == NULL) {
-		printf("open %s dex file error!\n", argv[3]);
-		return -1;
-	}
-	fseek(fp2, 0, SEEK_END);
-	size_t encrypt_dex_len = ftell(fp2);
-	fseek(fp2, 0, SEEK_SET);
-	printf("encrypt dex file length: 0x%x\n", encrypt_dex_len);
-	u1* encrypt_data = (u1*)malloc(encrypt_dex_len);
-	if (encrypt_data == NULL) {
-		printf("malloc memory fail!\n");
-		return -1;
-	}
-	fread(encrypt_data, encrypt_dex_len, 1, fp2);
-	fclose(fp2);
-	if (argc == 5)
+int repairDexFile(int argc, char** argv)
+{
+	size_t repair_dex_len = 0;
+	u1* repair_data = getFileData(argv[2], repair_dex_len);
+	if (repair_data == NULL)
 	{
-		printf("currently there is no mapping mode\n ");
+		return -1;
+	}
+	//手动确认文件格式正确,否者后面会出现错误, 这里需要将NULL替换成任意没有使用的字节,否者会影响后面的查找真实指令映射
+	readMapFile(argv[4]);
+	u1 key = (u1)htoi(argv[5]);
+	if (argc == 6)
+	{
 		isLookUpTable = false;
 	}
 	else
 	{
-		printf("currently there is mapping mode\n ");
 		isLookUpTable = true;
-		FILE *fp3 = fopen(argv[5], "rb");
-		if (fp3 == NULL)
+		size_t table_len = 0;
+		opcode_table = getFileData(argv[6], table_len);
+		if (opcode_table == NULL)
 		{
-			printf("open %s opcode_table file error!\n", argv[5]);
 			return -1;
 		}
-		fseek(fp3, 0, SEEK_END);
-		size_t table_len = ftell(fp3);
-		fseek(fp3, 0, SEEK_SET);
-		if (table_len != 256)
+		if (table_len != 0x100)
 		{
 			printf("opcode_table file format error, Its size must be 256 bytes of binary\n");
 			return -1;
 		}
+	}
+	FILE *fp_out = fopen(argv[3], "wb");
+	if (fp_out == NULL)
+	{
+		printf("Can not write the file: %s\n", argv[3]);
+		return -1;
+	}
+	// 这里重新申请下内存空间,预留足够的空间来保存修复后的classData结构体到文件后面
+	size_t out_dex_len = repair_dex_len + repair_dex_len / 10;
+	u1* out_data = (u1*)malloc(out_dex_len);
+	memset(out_data, 0, out_dex_len);
+	memcpy(out_data, repair_data, repair_dex_len);
+	free(repair_data);
+	DexFile* pOutDexFile = dexFileParse(out_data, repair_dex_len, 0);
+	u1* pFileEnd = (u1*)pOutDexFile->baseAddr + repair_dex_len;
+	findNativeMethodAndRepair(pOutDexFile, pFileEnd, (u1)htoi(argv[5]));
+	*(u4 *)((u1 *)pOutDexFile + 0x20) = (u4)(pFileEnd - pOutDexFile->baseAddr);	//由于结构体中有些字段包含const修饰,因此直接用指针改
+	printf("修正后文件大小为: 0x%x\n", pFileEnd - pOutDexFile->baseAddr);
 
-		fread(opcode_table, 256, 1, fp3);
-		fclose(fp3);
+	fwrite(out_data, pOutDexFile->pHeader->fileSize, 1, fp_out);
+	fclose(fp_out);
+	printf("完成文件修复: %s\n", argv[2]);
+	free(out_data);
+	free(pOriginalOpcode);
+	free(pEncryptOpcode);
+	free(opcode_table);
+	return 0;
+}
+
+/*根据我们生成的格式读取: 原指令opcode 加固后指令opcode 指令长度 指令描述, 这里要特别注意一定要把map表中的NULL换成加密指令没有使用的任意一个字节*/
+int readMapFile(const char* path) 
+{
+	//指令长度程序已经保存了一份,因此只需读取原指令opcode 和加固后指令opcode
+	FILE *fp = fopen(path, "rt");
+	if (fp == NULL)
+	{
+		printf("%s map file open error!\n", path);
+		return -1;
+	}
+	pOriginalOpcode = (u1*)malloc(kNumPackedOpcodes);
+	pEncryptOpcode = (u1*)malloc(kNumPackedOpcodes);
+	char line[LINE_MAX_CHAR_NUM];
+	for (int i = 0; i < kNumPackedOpcodes; i++)
+	{
+		memset(line, 0, LINE_MAX_CHAR_NUM);
+		fgets(line, LINE_MAX_CHAR_NUM, fp);
+		pOriginalOpcode[i] = (u1)htoi(strtok(line, " "));
+		pEncryptOpcode[i] = (u1)htoi(strtok(line, " "));
+		
+	}
+	return 0;
+}
+
+u1* getFileData(const char* path, size_t &len)
+{
+	FILE *fp = fopen(path, "rb");
+	if (fp == NULL) {
+		printf("open %s  file error!\n", path);
+		return NULL;
+	}
+	fseek(fp, 0, SEEK_END);
+	len = ftell(fp);
+	fseek(fp, 0, SEEK_SET);
+	printf("%s file length: 0x%x\n", path, len);
+	u1* data = (u1*)malloc(len);
+	if (data == NULL) {
+		printf("malloc memory fail!\n");
+		return NULL;
+	}
+	fread(data, len, 1, fp);
+	fclose(fp);
+	return data;
+}
+
+int generateMapFile(int argc, char** argv)
+{	
+	//这里注意要必须指定为二进制格式读, 如果以只读方式读取文件可能会导致部分文件读取数据错误
+	size_t source_dex_len = 0;
+	u1* source_data = getFileData(argv[2], source_dex_len);
+	if (source_data == NULL){
+		return -1;
+	}
+	size_t encrypt_dex_len = 0;
+	u1* encrypt_data = getFileData(argv[3], encrypt_dex_len);
+	if (encrypt_data == NULL) {
+		return -1;
+	}
+	if (argc == 6)
+	{
+		printf("currently there is no mapping mode\n");
+		isLookUpTable = false;
+	}
+	else
+	{
+		printf("currently there is mapping mode\n");
+		isLookUpTable = true;
+		size_t table_len = 0;
+		opcode_table = getFileData(argv[6], table_len);
+		if (opcode_table == NULL)
+		{
+			return -1;
+		}
+		if (table_len != 0x100)
+		{
+			printf("opcode_table file format error, Its size must be 256 bytes of binary\n");
+			return -1;
+		}
 	}
 
 	FILE *out_fp = fopen(argv[4], "wt+");
@@ -172,12 +266,12 @@ int generateMapFile(int argc, char** argv)
 		printf("open %s file failed\n", argv[4]);
 		return -1;
 	}
-	char table[256][100] = { 0 };
+	char table[kNumPackedOpcodes][LINE_MAX_CHAR_NUM] = { 0 };
 	DexFile* pSourceDexFile = dexFileParse(source_data, source_dex_len, 0);
 	DexFile* pEncryptDexFile = dexFileParse(encrypt_data, encrypt_dex_len, 0);
-	findNativeMethodAndGenerateMap(table, pSourceDexFile, pEncryptDexFile, 0x80);
+	findNativeMethodAndGenerateMap(table, pSourceDexFile, pEncryptDexFile, htoi(argv[5]));
 	//保存映射表到文件, 在table表中有些行是空行,如没有使用的opcode和dex文件中不存在的和没有包含的指令(throw, return, return-wide, return-object),通常不影响,加固后也使用不到这些指令
-	for (int i = 0; i < 256; i++)
+	for (int i = 0; i < kNumPackedOpcodes; i++)
 	{
 		if (*table[i] =='\0')
 		{
@@ -203,6 +297,7 @@ int generateMapFile(int argc, char** argv)
 	fclose(out_fp);
 	free(source_data);
 	free(encrypt_data);
+	free(opcode_table);
 	return 0;
 }
 
@@ -273,9 +368,134 @@ void generateMapTable(char table[256][100],const DexCode* sourceData, const DexC
 	
 }
 
-void decryptDexCode(u1** ptr_insns, u4 len, u4 registersSize, u4 classIdx, u4 methodIdx, u4 key, bool isLookUpTable)
+void decryptDexCode(DexFile* pDexFile, DexClassDef* pDexClassDef, ClassData* pClassData, DexCode* pDexCode, u1* pFileEnd, int methodInClassDataIdx, u1 key, bool isLookUpTable)
 {
-	u1 xor_key = (registersSize ^ classIdx ^ methodIdx ^ key) & 0xff;
+	//首先确定的是DexCode段中的所有指令都异或了key
+	for (u4 i = 0; i < pDexCode->insnsSize; i++)
+	{
+		pDexCode->insns[i] = pDexCode->insns[i] ^ (key << 8 | key);
+	}
+	bool hasDirective = false;
+	u4 insns_end_offset = pDexCode->insnsSize;
+	u4 offset = 0;
+	for (u4 i = 0; i < insns_end_offset; i++)
+	{
+		Opcode opcode;
+		if (isLookUpTable)
+		{
+			 opcode = (Opcode)opcode_table[dexOpcodeFromCodeUnit(pDexCode->insns[i])];
+		}
+		else
+		{
+			opcode = dexOpcodeFromCodeUnit(pDexCode->insns[i]);
+		}	
+		int index = findOpcodeRealIndex(opcode);
+		assert(index != -1);
+		if ((Opcode)index == OP_PACKED_SWITCH || (Opcode)index == OP_SPARSE_SWITCH || (Opcode)index == OP_FILL_ARRAY_DATA)
+		{
+			printf("%s指令索引: %d  ", dexGetOpcodeName((Opcode)index), i);
+			offset = (pDexCode->insns[i + 1] | (pDexCode->insns[i + 2] << 16)) + i;
+			printf("%s 数据在指令中索引: %d\n", dexGetOpcodeName((Opcode)index), offset);
+			if (offset < insns_end_offset)
+			{
+				insns_end_offset = offset;
+				printf("更新伪指令起始指令索引: %d\n", insns_end_offset);
+			}
+			hasDirective = true;
+		}
+		pDexCode->insns[i] = (pDexCode->insns[i] & 0xff00) | pOriginalOpcode[index];
+		i = i + Opcode_Len[index] - 1;
+	}
+
+	pDexClassDef->classDataOff = (u4)(pFileEnd - pDexFile->baseAddr);
+	printf("修复最新classDataOff: 0x%x", pDexClassDef->classDataOff);
+	pClassData->encodedMethod[methodInClassDataIdx].codeOff = pDexCode;
+	printf("更新方法最新DexCode偏移: 0x%x\n", (u1*)pDexCode - pDexFile->baseAddr);
+	pClassData->encodedMethod[methodInClassDataIdx].accessFlags = pClassData->encodedMethod[methodInClassDataIdx].accessFlags & ~ACC_NATIVE;
+	printf("更新方法最新访问权限: 0x%x\n", pClassData->encodedMethod[methodInClassDataIdx].accessFlags);
+	//下面开始写入新的classData到文件末尾
+	pFileEnd = writeUnsignedLeb128(pFileEnd, (u4)pClassData->staticFieldsSize);
+	pFileEnd = writeUnsignedLeb128(pFileEnd, (u4)pClassData->instanceFieldsSize);
+	pFileEnd = writeUnsignedLeb128(pFileEnd, (u4)pClassData->directMethodsSize);
+	pFileEnd = writeUnsignedLeb128(pFileEnd, (u4)pClassData->virtualMethodsSize);
+	for (int i = 0; i < pClassData->staticFieldsSize + pClassData->instanceFieldsSize; i++)
+	{
+		pFileEnd = writeUnsignedLeb128(pFileEnd, (u4)pClassData->encodedField[i].fieldIdxDiff);
+		pFileEnd = writeUnsignedLeb128(pFileEnd, (u4)pClassData->encodedField[i].accessFlags);
+
+	}
+	printf("写入classData最新字段完成: staticFieldsSize: %d, instanceFieldsSize: %d, directMethodsSize: %d, virtualMethodsSize: %d\n", pClassData->staticFieldsSize, pClassData->instanceFieldsSize, pClassData->directMethodsSize, pClassData->virtualMethodsSize);
+	for (int i = 0; i < pClassData->directMethodsSize + pClassData->virtualMethodsSize; i++)
+	{
+		pFileEnd = writeUnsignedLeb128(pFileEnd, (u4)pClassData->encodedMethod[i].methodIdxDiff);
+		pFileEnd = writeUnsignedLeb128(pFileEnd, (u4)pClassData->encodedMethod[i].accessFlags);
+		u4 codeOff = (u4)((u1*)pClassData->encodedMethod[i].codeOff - pDexFile->baseAddr);
+		pFileEnd = writeUnsignedLeb128(pFileEnd, codeOff);
+	}
+	printf("写入方法ClassDataInMethod完成");
+}
+
+int findOpcodeRealIndex(Opcode opcode)
+{
+	for (int i = 0; i < kNumPackedOpcodes; i++)
+	{
+		if (pEncryptOpcode[i] == opcode)
+		{
+			return i;
+		}
+	}
+	return -1;
+}
+
+void findNativeMethodAndRepair(DexFile* pDexFile,u1* pFileEnd, u1 key_360)
+{
+	DexClassDef* pDexClassDef = NULL;
+	DexCode* pDexCode = NULL;
+	ClassData* pClassData = NULL;
+	DexMethodId* pDexMethodId = NULL;
+	u4 lastDexCodeOff = 0;
+	for (u4 i = 0; i < pDexFile->pHeader->classDefsSize; i++)
+	{
+		pDexClassDef = (DexClassDef*)dexGetClassDef(pDexFile, i);
+		if (pDexClassDef->classDataOff != 0)
+		{
+			pClassData = dexGetClassData(pDexFile, pClassData, pDexFile->baseAddr + pDexClassDef->classDataOff);
+			int baseMethodIdx = 0;
+			for (int j = 0; j < pClassData->directMethodsSize + pClassData->virtualMethodsSize; j++)
+			{
+				if (j == 0 || j == pClassData->directMethodsSize)
+				{
+					baseMethodIdx = pClassData->encodedMethod[j].methodIdxDiff;
+				}
+				else
+				{
+					baseMethodIdx += pClassData->encodedMethod[j].methodIdxDiff;
+				}
+				if (pClassData->encodedMethod[j].codeOff == NULL && (pClassData->encodedMethod[j].accessFlags & ACC_NATIVE))
+				{
+					pDexMethodId = (DexMethodId*)dexGetMethodId(pDexFile, baseMethodIdx);
+					const char* method_name = dexStringById(pDexFile, pDexMethodId->nameIdx);
+					if (strcmp(method_name, "onCreate") == 0)
+					{
+						printf("找到待修复的method: \n");
+						printMethodStringById(pDexFile, baseMethodIdx, pClassData->encodedMethod[j].accessFlags);
+						pDexCode = (DexCode*)(pDexFile->baseAddr + lastDexCodeOff);
+						u1 key = (pDexMethodId->classIdx ^ baseMethodIdx ^ pDexCode->registersSize ^ key_360) &0xff;
+						decryptDexCode(pDexFile, pDexClassDef, pClassData, pDexCode, pFileEnd, j, key, isLookUpTable);
+					}
+				}
+				else if (pClassData->encodedMethod[j].codeOff != NULL)
+				{
+					if (lastDexCodeOff == 0) {
+						lastDexCodeOff = (const u1 *)pClassData->encodedMethod[j].codeOff - pDexFile->baseAddr;
+					}
+					pDexCode = pClassData->encodedMethod[j].codeOff;
+					// 读取DexCode的insns,找到insns的结束位置
+					lastDexCodeOff = BYTE4_ALIGN((const u1*)&pDexCode->insns[pDexCode->insnsSize] - pDexFile->baseAddr);
+				}
+			}
+		}
+	}
 }
 
 void findNativeMethodAndGenerateMap(char table[256][100], const DexFile* pSourceDexFile, const DexFile* pEncryptDexFile, u1 key_360)
@@ -295,13 +515,11 @@ void findNativeMethodAndGenerateMap(char table[256][100], const DexFile* pSource
 			int baseMethodIndex = 0;
 			for (int j = 0; j < pEnClassData->directMethodsSize + pEnClassData->virtualMethodsSize; j++)
 			{
-				if (j == 0) {
-					baseMethodIndex = pEnClassData->encodedMethod[0].methodIdxDiff;
-				}
-				else if (j == pEnClassData->directMethodsSize) {
+				if (j == 0 || j == pEnClassData->directMethodsSize) {
 					baseMethodIndex = pEnClassData->encodedMethod[j].methodIdxDiff;
 				}
-				else {
+				else 
+				{
 					baseMethodIndex += pEnClassData->encodedMethod[j].methodIdxDiff;
 				}
 
