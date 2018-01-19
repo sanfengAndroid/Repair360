@@ -385,6 +385,10 @@ void decryptDexCode(DexFile* pDexFile, DexClassDef* pDexClassDef, ClassData* pCl
 	bool hasDirective = false;
 	u4 insns_end_offset = pDexCode->insnsSize;
 	u4 offset = 0;
+
+	//前面将末尾附带的三种伪指令数据都进行了异或处理,而实际情况是360没有处理伪指令,因此需要异或回来
+	//360对如下操作码 1A 1B 22 23 24 25 6e 74 70 76 71 77 72 78 参数索引做了+1处理
+	//同时还对三种伪指令特征码(0x300, 0x200, 0x100)的低字节做了非0处理,这个值可能不固定
 	for (u4 i = 0; i < insns_end_offset; i++)
 	{
 		Opcode opcode;
@@ -403,6 +407,8 @@ void decryptDexCode(DexFile* pDexFile, DexClassDef* pDexClassDef, ClassData* pCl
 			printf("%s指令索引: %d  ", dexGetOpcodeName((Opcode)index), i);
 			offset = (pDexCode->insns[i + 1] | (pDexCode->insns[i + 2] << 16)) + i;
 			printf("%s 数据在指令中索引: %d\n", dexGetOpcodeName((Opcode)index), offset);
+			//这里对三种伪指令特征码还原
+			pDexCode->insns[offset] = pDexCode->insns[offset] & 0xff00;
 			if (offset < insns_end_offset)
 			{
 				insns_end_offset = offset;
@@ -410,10 +416,31 @@ void decryptDexCode(DexFile* pDexFile, DexClassDef* pDexClassDef, ClassData* pCl
 			}
 			hasDirective = true;
 		}
+		switch ((Opcode)index)		//360对如下操作码 1A 1B 22 23 24 25 6e 70 71 72 74 76 77 78 参数索引做了+1处理
+		{
+		case OP_CONST_STRING:
+		case OP_CONST_STRING_JUMBO:
+		case OP_NEW_INSTANCE:
+		case OP_NEW_ARRAY:
+		case OP_FILLED_NEW_ARRAY:
+		case OP_FILLED_NEW_ARRAY_RANGE:
+		case OP_INVOKE_VIRTUAL:
+		case OP_INVOKE_DIRECT:
+		case OP_INVOKE_STATIC:
+		case OP_INVOKE_INTERFACE:
+		case OP_INVOKE_VIRTUAL_RANGE:
+		case OP_INVOKE_DIRECT_RANGE:
+		case OP_INVOKE_STATIC_RANGE:
+		case OP_INVOKE_INTERFACE_RANGE:
+			pDexCode->insns[i + 1] = pDexCode->insns[i + 1] - 1;
+			break;
+		default:
+			break;
+		}
 		pDexCode->insns[i] = (pDexCode->insns[i] & 0xff00) | pOriginalOpcode[index];
 		i = i + Opcode_Len[index] - 1;
 	}
-	//前面讲末尾附带的三种伪指令数据都进行了异或处理,而实际情况是360没有处理伟指令,因此需要异或回来
+	
 	if (hasDirective)
 	{
 		for (u4 i = insns_end_offset; i < pDexCode->insnsSize; i++)
