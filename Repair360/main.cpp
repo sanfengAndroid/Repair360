@@ -9,10 +9,12 @@
 u1* getFileData(const char* path, size_t& len);
 int repairDexFile(int argc, char** argv);
 int readMapFile(const char* path);
-void findNativeMethodAndRepair(DexFile* pDexFile, u1* pFileEnd, u1 key_360);
+void findNativeMethodAndRepair(DexFile* pDexFile, u1* &pFileEnd, u1 key_360);
 int findOpcodeRealIndex(Opcode opcode);
+void decryptDexCode(DexFile* pDexFile, DexClassDef* pDexClassDef, ClassData* pClassData, DexCode* pDexCode, u1* &pFileEnd, int methodInClassDataIdx, u1 key, bool isLookUpTable);
 
 #define BYTE4_ALIGN(a) ( ((a) % 4) ? ((((a) >> 2) << 2) + 4): (a))
+#define GETINSNS(insns, key) ((insns) & ~((key) << 8 | (key)) | ~(insns) & ((key) << 8 | (key)))
 #define LINE_MAX_CHAR_NUM 100
 u1* opcode_table = NULL;
 u1* pOriginalOpcode = NULL;
@@ -40,7 +42,8 @@ int Opcode_Len[256] = {
 
 };
 
-
+//-g D:\Android破解实例\classes.dex D:\Android破解实例\360test\dump.dex D:\Android破解实例\360test\map.txt 0x80 D:\Android破解实例\360test\opcode_table
+//-d D:\Android破解实例\360test\dump.dex D:\Android破解实例\360test\repair.dex D:\Android破解实例\360test\map.txt 0x80 D:\Android破解实例\360test\opcode_table 
 
 int main(int argc, char **argv)
 {
@@ -167,10 +170,11 @@ int repairDexFile(int argc, char** argv)
 	DexFile* pOutDexFile = dexFileParse(out_data, repair_dex_len, 0);
 	u1* pFileEnd = (u1*)pOutDexFile->baseAddr + repair_dex_len;
 	findNativeMethodAndRepair(pOutDexFile, pFileEnd, (u1)htoi(argv[5]));
-	*(u4 *)((u1 *)pOutDexFile + 0x20) = (u4)(pFileEnd - pOutDexFile->baseAddr);	//由于结构体中有些字段包含const修饰,因此直接用指针改
+	u4 new_dex_len = (u4)(pFileEnd - pOutDexFile->baseAddr);
+	*(u4*)(out_data + 0x20) = new_dex_len;							//由于结构体中有些字段包含const修饰,因此直接用指针改
 	printf("修正后文件大小为: 0x%x\n", pFileEnd - pOutDexFile->baseAddr);
 
-	fwrite(out_data, pOutDexFile->pHeader->fileSize, 1, fp_out);
+	fwrite(out_data, new_dex_len, 1, fp_out);
 	fclose(fp_out);
 	printf("完成文件修复: %s\n", argv[2]);
 	free(out_data);
@@ -198,7 +202,7 @@ int readMapFile(const char* path)
 		memset(line, 0, LINE_MAX_CHAR_NUM);
 		fgets(line, LINE_MAX_CHAR_NUM, fp);
 		pOriginalOpcode[i] = (u1)htoi(strtok(line, " "));
-		pEncryptOpcode[i] = (u1)htoi(strtok(line, " "));
+		pEncryptOpcode[i] = (u1)htoi(strtok(NULL, " "));
 		
 	}
 	return 0;
@@ -303,6 +307,7 @@ int generateMapFile(int argc, char** argv)
 
 void generateMapTable(char table[256][100],const DexCode* sourceData, const DexCode* encryptData, u1 key, bool lookUpTable) 
 {
+	printf("key: 0x%x", key);
 	u4 insnsSize = sourceData->insnsSize;
 	//默认情况下伪指令是在指令的最后部分, 因此指令查找到伪指令起始指令即可,但是要注意伪指令必须位于偶数字节码偏移(4字节对齐), 因此之前一个指令可能为nop指令
 	u4 insns_end_offset = insnsSize;
@@ -312,12 +317,13 @@ void generateMapTable(char table[256][100],const DexCode* sourceData, const DexC
 	{
 		Opcode opcode = dexOpcodeFromCodeUnit(sourceData->insns[i]);
 		Opcode encrypt_opcode;
+		//u2 insns = GETINSNS(encryptData->insns[i], key);
 		if (lookUpTable) {
-			encrypt_opcode = (Opcode)opcode_table[dexOpcodeFromCodeUnit(encryptData->insns[i]) ^ key];
+			encrypt_opcode = (Opcode)opcode_table[(dexOpcodeFromCodeUnit(encryptData->insns[i]) & 0xff) ^ key];
 		}
 		else
 		{
-			encrypt_opcode = (Opcode)(dexOpcodeFromCodeUnit(encryptData->insns[i]) ^ key);
+			encrypt_opcode = (Opcode)((dexOpcodeFromCodeUnit(encryptData->insns[i]) & 0xff) ^ key);
 		}
 		// 这里要考虑packed-switch-payload, sparse-switch-payload, fill-array-data-payload三种伪指令的情况
 		printf("当前指令: %s\n", dexGetOpcodeName(opcode));
@@ -368,9 +374,10 @@ void generateMapTable(char table[256][100],const DexCode* sourceData, const DexC
 	
 }
 
-void decryptDexCode(DexFile* pDexFile, DexClassDef* pDexClassDef, ClassData* pClassData, DexCode* pDexCode, u1* pFileEnd, int methodInClassDataIdx, u1 key, bool isLookUpTable)
+void decryptDexCode(DexFile* pDexFile, DexClassDef* pDexClassDef, ClassData* pClassData, DexCode* pDexCode, u1* &pFileEnd, int methodInClassDataIdx, u1 key, bool isLookUpTable)
 {
-	//首先确定的是DexCode段中的所有指令都异或了key
+	printf("key: 0x%x\n", key);
+	//首先确定的是DexCode段中的所有指令都异或了key, 但是三种伪指令实际上是没有加密的
 	for (u4 i = 0; i < pDexCode->insnsSize; i++)
 	{
 		pDexCode->insns[i] = pDexCode->insns[i] ^ (key << 8 | key);
@@ -406,6 +413,15 @@ void decryptDexCode(DexFile* pDexFile, DexClassDef* pDexClassDef, ClassData* pCl
 		pDexCode->insns[i] = (pDexCode->insns[i] & 0xff00) | pOriginalOpcode[index];
 		i = i + Opcode_Len[index] - 1;
 	}
+	//前面讲末尾附带的三种伪指令数据都进行了异或处理,而实际情况是360没有处理伟指令,因此需要异或回来
+	if (hasDirective)
+	{
+		for (u4 i = insns_end_offset; i < pDexCode->insnsSize; i++)
+		{
+			pDexCode->insns[i] = pDexCode->insns[i] ^ (key << 8 | key);
+		}
+	}
+
 
 	pDexClassDef->classDataOff = (u4)(pFileEnd - pDexFile->baseAddr);
 	printf("修复最新classDataOff: 0x%x", pDexClassDef->classDataOff);
@@ -432,7 +448,7 @@ void decryptDexCode(DexFile* pDexFile, DexClassDef* pDexClassDef, ClassData* pCl
 		u4 codeOff = (u4)((u1*)pClassData->encodedMethod[i].codeOff - pDexFile->baseAddr);
 		pFileEnd = writeUnsignedLeb128(pFileEnd, codeOff);
 	}
-	printf("写入方法ClassDataInMethod完成");
+	printf("写入方法ClassDataInMethod完成\n");
 }
 
 int findOpcodeRealIndex(Opcode opcode)
@@ -447,7 +463,7 @@ int findOpcodeRealIndex(Opcode opcode)
 	return -1;
 }
 
-void findNativeMethodAndRepair(DexFile* pDexFile,u1* pFileEnd, u1 key_360)
+void findNativeMethodAndRepair(DexFile* pDexFile,u1* &pFileEnd, u1 key_360)
 {
 	DexClassDef* pDexClassDef = NULL;
 	DexCode* pDexCode = NULL;
