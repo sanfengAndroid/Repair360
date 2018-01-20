@@ -21,6 +21,7 @@
   <ItemGroup>
     <ClInclude Include="..\..\..\Repair360Jiagu\DexFile.h" />
     <ClInclude Include="..\..\..\Repair360Jiagu\Leb128.h" />
+    <ClInclude Include="main.h" />
     <ClInclude Include="Utils.h" />
   </ItemGroup>
   <ItemGroup>
