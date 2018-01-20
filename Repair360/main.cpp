@@ -387,8 +387,8 @@ void decryptDexCode(DexFile* pDexFile, DexClassDef* pDexClassDef, ClassData* pCl
 	u4 offset = 0;
 
 	//前面将末尾附带的三种伪指令数据都进行了异或处理,而实际情况是360没有处理伪指令,因此需要异或回来
-	//360对如下操作码 1A 1B 22 23 24 25 6e 74 70 76 71 77 72 78 参数索引做了+1处理
-	//同时还对三种伪指令特征码(0x300, 0x200, 0x100)的低字节做了非0处理,这个值可能不固定
+	//360没有更改指令的常量索引,因为360应该是反编译为smali代码后添加静态块代码导致了type_idx,method_idx,string_idx索引有所变化
+	//360只是对三种伪指令特征码(0x300, 0x200, 0x100)的低字节做了非0处理,这个值可能不固定
 	for (u4 i = 0; i < insns_end_offset; i++)
 	{
 		Opcode opcode;
@@ -407,8 +407,8 @@ void decryptDexCode(DexFile* pDexFile, DexClassDef* pDexClassDef, ClassData* pCl
 			printf("%s指令索引: %d  ", dexGetOpcodeName((Opcode)index), i);
 			offset = (pDexCode->insns[i + 1] | (pDexCode->insns[i + 2] << 16)) + i;
 			printf("%s 数据在指令中索引: %d\n", dexGetOpcodeName((Opcode)index), offset);
-			//这里对三种伪指令特征码还原
-			pDexCode->insns[offset] = pDexCode->insns[offset] & 0xff00;
+			//这里对三种伪指令特征码还原, 由于前面已经把所有指令都异或了一遍,为了后面处理方便,所以这里伪指令的特征码低位该保存key
+			pDexCode->insns[offset] = (pDexCode->insns[offset] & 0xff00) | key;
 			if (offset < insns_end_offset)
 			{
 				insns_end_offset = offset;
@@ -416,27 +416,8 @@ void decryptDexCode(DexFile* pDexFile, DexClassDef* pDexClassDef, ClassData* pCl
 			}
 			hasDirective = true;
 		}
-		switch ((Opcode)index)		//360对如下操作码 1A 1B 22 23 24 25 6e 70 71 72 74 76 77 78 参数索引做了+1处理
-		{
-		case OP_CONST_STRING:
-		case OP_CONST_STRING_JUMBO:
-		case OP_NEW_INSTANCE:
-		case OP_NEW_ARRAY:
-		case OP_FILLED_NEW_ARRAY:
-		case OP_FILLED_NEW_ARRAY_RANGE:
-		case OP_INVOKE_VIRTUAL:
-		case OP_INVOKE_DIRECT:
-		case OP_INVOKE_STATIC:
-		case OP_INVOKE_INTERFACE:
-		case OP_INVOKE_VIRTUAL_RANGE:
-		case OP_INVOKE_DIRECT_RANGE:
-		case OP_INVOKE_STATIC_RANGE:
-		case OP_INVOKE_INTERFACE_RANGE:
-			pDexCode->insns[i + 1] = pDexCode->insns[i + 1] - 1;
-			break;
-		default:
-			break;
-		}
+
+		
 		pDexCode->insns[i] = (pDexCode->insns[i] & 0xff00) | pOriginalOpcode[index];
 		i = i + Opcode_Len[index] - 1;
 	}
