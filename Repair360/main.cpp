@@ -450,7 +450,7 @@ void handle360GenerateMapOrDecrypt(DexFile* pSourceDexFile, char table[kNumPacke
 					{
 						if (decryptMode)
 						{
-							printf(">>> 找到待修复的method: \n");
+							printf(">>> 找到待修复的method: class_def_item = %d  methodId = %d \n", i, baseMethodIdx);
 							//这里还应该考虑上一个DexCode有没有try_catch块,因为这里会影响真正的DexCode在文件中的偏移
 							if (pLastDexCode->triesSize > 0)
 							{
@@ -468,17 +468,18 @@ void handle360GenerateMapOrDecrypt(DexFile* pSourceDexFile, char table[kNumPacke
 								{
 									//catch_handler
 									int catch_handler_size = readSignedLeb128(&p_new_DexCode);	//这里size有正数, 0, 负数三种区别
-									if (catch_handler_size < 0)
-									{
-										catch_handler_size = -1 * catch_handler_size;
-									}
-									for (int m = 0; m < catch_handler_size; m++)
+									bool is_nagtive = catch_handler_size > 0 ? false : true;
+									for (int m = 0; m < abs(catch_handler_size); m++)
 									{
 										//type_addr_pair
 										assert((p_new_DexCode - pEncryptDexFile->baseAddr) > 0 && (u4)(p_new_DexCode - pEncryptDexFile->baseAddr) < pEncryptDexFile->pHeader->fileSize);
 										readUnsignedLeb128(&p_new_DexCode);
 										assert((p_new_DexCode - pEncryptDexFile->baseAddr) > 0 && (u4)(p_new_DexCode - pEncryptDexFile->baseAddr) < pEncryptDexFile->pHeader->fileSize);
 										readUnsignedLeb128(&p_new_DexCode);
+									}
+									if (is_nagtive)
+									{
+										readUnsignedLeb128(&p_new_DexCode);			// 为负数时包含一个所有catch模块
 									}
 								}
 								lastDexCodeOff = BYTE4_ALIGN(p_new_DexCode - pEncryptDexFile->baseAddr);
