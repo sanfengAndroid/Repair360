@@ -147,8 +147,8 @@ int readMapFile(const char* path)
 	{
 		memset(line, 0, LINE_MAX_CHAR_NUM);
 		fgets(line, LINE_MAX_CHAR_NUM, fp);
-		pOriginalOpcode[i] = (u1)htoi(strtok(line, " "));
-		pEncryptOpcode[i] = (u1)htoi(strtok(NULL, " "));	//这里需要map文件中的NULL替换为任意未使用的字节
+		pOriginalOpcode[i] = (u1)htoi(strtok(line, " "));	// map表按字节顺序存储,因此可以不用该数组
+		pEncryptOpcode[i] = (u1)htoi(strtok(NULL, " "));	//这里需要map文件中的NULL替换为任意未使用的字节防止出错
 		
 	}
 	return 0;
@@ -334,8 +334,9 @@ void decryptDexCode(DexFile* pDexFile, DexClassDef* pDexClassDef, ClassData* pCl
 	u4 insns_end_offset = pDexCode->insnsSize;
 	u4 offset = 0;
 
-	//360没有更改指令的常量索引,因为360应该是反编译为smali代码后添加静态块代码导致了type_idx,method_idx,string_idx索引有所变化
-	//360只是对三种伪指令特征码(0x300, 0x200, 0x100)的低字节做了非0处理,这个值可能不固定
+	// 360没有更改指令的常量索引,因为360应该是反编译为smali代码后添加静态块代码导致了type_idx,method_idx,string_idx索引有所变化
+	// 360只是对三种伪指令特征码(0x300, 0x200, 0x100)的低字节做了非0处理,这个值可能不固定
+	// 三种伪指令都包含在insnsSize里面,通常0x200伪指令编译器都会优化成if-else结构
 	for (u4 i = 0; i < insns_end_offset; i++)
 	{
 		Opcode opcode;
@@ -347,13 +348,13 @@ void decryptDexCode(DexFile* pDexFile, DexClassDef* pDexClassDef, ClassData* pCl
 		{
 			opcode = dexOpcodeFromCodeUnit(pDexCode->insns[i]);
 		}	
-		int index = findOpcodeRealIndex(opcode);
-		assert(index != -1);
-		if ((Opcode)index == OP_PACKED_SWITCH || (Opcode)index == OP_SPARSE_SWITCH || (Opcode)index == OP_FILL_ARRAY_DATA)
+		Opcode real_opcode = findRealOpcode(opcode);		// 通过加密后的opcode去查找在map表中真实的指令
+		assert(real_opcode != OP_UNUSED_FF);
+		if (real_opcode == OP_PACKED_SWITCH || real_opcode == OP_SPARSE_SWITCH || real_opcode == OP_FILL_ARRAY_DATA)
 		{
-			printf(">>> %s 指令索引: %d  ", dexGetOpcodeName((Opcode)index), i);
+			printf(">>> %s 指令索引: %d  ", dexGetOpcodeName(real_opcode), i);
 			offset = (pDexCode->insns[i + 1] | (pDexCode->insns[i + 2] << 16)) + i;
-			printf(">>> %s 数据在指令中索引: %d\n", dexGetOpcodeName((Opcode)index), offset);
+			printf(">>> %s 数据在指令中索引: %d\n", dexGetOpcodeName(real_opcode), offset);
 			//这里对三种伪指令特征码还原, 由于前面已经把所有指令都异或了一遍,为了后面处理方便,所以这里伪指令的特征码低位该保存key
 			pDexCode->insns[offset] = (pDexCode->insns[offset] & 0xff00) | key;
 			if (offset < insns_end_offset)
@@ -363,8 +364,8 @@ void decryptDexCode(DexFile* pDexFile, DexClassDef* pDexClassDef, ClassData* pCl
 			}
 			hasDirective = true;
 		}
-		pDexCode->insns[i] = (pDexCode->insns[i] & 0xff00) | pOriginalOpcode[index];
-		i = i + Opcode_Len[index] - 1;
+		pDexCode->insns[i] = (pDexCode->insns[i] & 0xff00) | real_opcode;
+		i = i + Opcode_Len[real_opcode] - 1;	// 增加指令长度
 	}
 	//前面将末尾附带的三种伪指令数据都进行了异或处理,而实际情况是360没有处理伪指令,因此需要异或回来
 	if (hasDirective)
@@ -403,16 +404,16 @@ void decryptDexCode(DexFile* pDexFile, DexClassDef* pDexClassDef, ClassData* pCl
 	printf(">>> 写入方法ClassData中method完成\n");
 }
 
-int findOpcodeRealIndex(Opcode opcode)
+Opcode findRealOpcode(Opcode encrpty_opcode)	// 索引即为真实指令,保存的值为加密后的指令
 {
 	for (int i = 0; i < kNumPackedOpcodes; i++)
 	{
-		if (pEncryptOpcode[i] == opcode)
+		if ((Opcode)pEncryptOpcode[i] == encrpty_opcode)
 		{
-			return i;
+			return (Opcode)i;
 		}
 	}
-	return -1;
+	return OP_UNUSED_FF;
 }
 
 void handle360GenerateMapOrDecrypt(DexFile* pSourceDexFile, char table[kNumPackedOpcodes][LINE_MAX_CHAR_NUM], DexFile* pEncryptDexFile, u1* &pFileEnd, u1 key_360)
@@ -433,7 +434,7 @@ void handle360GenerateMapOrDecrypt(DexFile* pSourceDexFile, char table[kNumPacke
 			int baseMethodIdx = 0;
 			for (int j = 0; j < pClassData->directMethodsSize + pClassData->virtualMethodsSize; j++)
 			{
-				if (j == 0 || j == pClassData->directMethodsSize)
+				if (j == 0 || j == pClassData->directMethodsSize)		// 修正methodId
 				{
 					baseMethodIdx = pClassData->encodedMethod[j].methodIdxDiff;
 				}
@@ -451,35 +452,31 @@ void handle360GenerateMapOrDecrypt(DexFile* pSourceDexFile, char table[kNumPacke
 						if (decryptMode)
 						{
 							printf(">>> 找到待修复的method: class_def_item = %d  methodId = %d \n", i, baseMethodIdx);
-							//这里还应该考虑上一个DexCode有没有try_catch块,因为这里会影响真正的DexCode在文件中的偏移
+							// 这里还应该考虑上一个DexCode有没有try_catch块,因为try_catch没有计算到insnsSize中,而是紧跟其后
+							// 注意try_item紧跟指令后面,且必须4字节对齐,因此可能会有填充指令00 00
 							if (pLastDexCode->triesSize > 0)
 							{
 								printf(">>> 上一个DexCode包含try_catch模块,需要修复真实DexCode偏移, 如果出错,很可能在这里读取出错\n");
 								const u1* p_new_DexCode = pEncryptDexFile->baseAddr + lastDexCodeOff;
-								for (u2 k = 0; k < pLastDexCode->triesSize; i++)
-								{
-									p_new_DexCode += 4;			//try_item[k]->start_addr
-									p_new_DexCode += 2;			//try_item[k]->insn_count
-									p_new_DexCode += 2;			//try_item[k]->handler_off
-								}
+								p_new_DexCode += 8 * pLastDexCode->triesSize; //try_item[k]->start_addr try_item[k]->insn_count try_item[k]->insn_count
 								// catch_handler_list
 								u4 catch_handler_list_size = readUnsignedLeb128(&p_new_DexCode);	//catch_handler_list->size
 								for (u4 l = 0; l < catch_handler_list_size; l++)
 								{
-									//catch_handler
+									//encoded_catch_handler
 									int catch_handler_size = readSignedLeb128(&p_new_DexCode);	//这里size有正数, 0, 负数三种区别
 									bool is_nagtive = catch_handler_size > 0 ? false : true;
 									for (int m = 0; m < abs(catch_handler_size); m++)
 									{
-										//type_addr_pair
+										//encoded_type_addr_pair
 										assert((p_new_DexCode - pEncryptDexFile->baseAddr) > 0 && (u4)(p_new_DexCode - pEncryptDexFile->baseAddr) < pEncryptDexFile->pHeader->fileSize);
-										readUnsignedLeb128(&p_new_DexCode);
+										readUnsignedLeb128(&p_new_DexCode);	// type_idx
 										assert((p_new_DexCode - pEncryptDexFile->baseAddr) > 0 && (u4)(p_new_DexCode - pEncryptDexFile->baseAddr) < pEncryptDexFile->pHeader->fileSize);
-										readUnsignedLeb128(&p_new_DexCode);
+										readUnsignedLeb128(&p_new_DexCode);	// addr
 									}
 									if (is_nagtive)
 									{
-										readUnsignedLeb128(&p_new_DexCode);			// 为负数时包含一个所有catch模块
+										readUnsignedLeb128(&p_new_DexCode);			// 为负数时包含一个所有捕获catch_all_addr
 									}
 								}
 								lastDexCodeOff = BYTE4_ALIGN(p_new_DexCode - pEncryptDexFile->baseAddr);

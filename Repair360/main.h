@@ -9,7 +9,7 @@ u1* getFileData(const char* path, size_t& len);
 int repairDexFile(int argc, char** argv);
 int readMapFile(const char* path);
 void handle360GenerateMapOrDecrypt(DexFile* pSourceDexFile, char table[kNumPackedOpcodes][LINE_MAX_CHAR_NUM], DexFile* pEncryptDexFile, u1* &pFileEnd, u1 key_360);
-int findOpcodeRealIndex(Opcode opcode);
+Opcode findRealOpcode(Opcode opcode);
 void decryptDexCode(DexFile* pDexFile, DexClassDef* pDexClassDef, ClassData* pClassData, DexCode* pDexCode, u1* &pFileEnd, int methodInClassDataIdx, u1 key, bool isLookUpTable);
 
 ClassData* dexGetClassData(const DexFile* pDexFile, ClassData* pClassData, const u1* data);
@@ -32,6 +32,5 @@ u1* getFileData(const char* path, size_t& len);
 int repairDexFile(int argc, char** argv);
 int readMapFile(const char* path);
 void handle360GenerateMapOrDecrypt(DexFile* pSourceDexFile, char table[kNumPackedOpcodes][LINE_MAX_CHAR_NUM], DexFile* pEncryptDexFile, u1* &pFileEnd, u1 key_360);
-int findOpcodeRealIndex(Opcode opcode);
 void decryptDexCode(DexFile* pDexFile, DexClassDef* pDexClassDef, ClassData* pClassData, DexCode* pDexCode, u1* &pFileEnd, int methodInClassDataIdx, u1 key, bool isLookUpTable);
 #endif // !_MAIN_H_
